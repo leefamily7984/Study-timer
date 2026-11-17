@@ -20,7 +20,7 @@ main{max-width:1020px;margin:0 auto;padding:20px 16px 40px;display:grid;grid-tem
 h1{grid-column:1/-1;margin:0;font-size:20px;font-weight:700}
 .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px}
 .cam{position:relative;aspect-ratio:4/3;background:#000;border-radius:8px;overflow:hidden}
-.cam video,.cam canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;transform:scaleX(-1)}
+.cam video,.cam canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;transform:scaleX(-1)}
 #badge{margin-top:12px;padding:10px 12px;border-radius:8px;font-weight:600;background:var(--bg);border-left:5px solid var(--mute)}
 #badge.run{border-color:var(--ok)}#badge.auto{border-color:var(--warn)}#badge.man{border-color:var(--acc)}#badge.stop{border-color:var(--bad)}
 .clocks{display:grid;grid-template-columns:1.6fr 1fr;gap:12px;align-items:end}
@@ -56,11 +56,12 @@ summary{cursor:pointer;color:var(--mute)}
   .cam video,.cam canvas{object-fit:contain}
   li{font-size:15px}
 }
+@media(max-width:820px){.cam{max-height:36dvh}}
 </style>
 </head>
 <body>
 <main>
-  <h1>공부 타이머 <span class="lab">카메라로 자세를 확인해 자동으로 기록해요. 영상은 이 브라우저 안에서만 처리됩니다.</span></h1>
+  <h1>공부 타이머 <span class="lab">폰을 학생의 왼쪽 앞 45°에 두고, 얼굴·왼쪽 어깨·양손이 화면에 들어오게 해 주세요. 영상은 이 폰 안에서만 처리돼요.</span></h1>
 
   <section class="card">
     <div class="cam"><video id="vid" playsinline muted></video><canvas id="cv"></canvas></div>
@@ -80,7 +81,7 @@ summary{cursor:pointer;color:var(--mute)}
     </div>
     <div id="sum"></div>
     <ul id="conds"></ul>
-    <details><summary>유예시간 설정 (초)</summary><div class="set" id="set"></div></details>
+    <details><summary>유예시간(초) · 감지 기준 설정</summary><div class="set" id="set"></div></details>
   </section>
 </main>
 
@@ -101,27 +102,30 @@ const CFG=[
  {id:4,name:'고개 돌림',desc:'고개가 좌우로 크게 돌아감',g:10},
  {id:5,name:'움직임 없음',desc:'눈·손·상체 모두 거의 정지',g:120},
  {id:6,name:'손 위치',desc:'손이 가슴 위·얼굴 근처에 머묾',g:20},
- {id:8,name:'등받이에 기댐',desc:'상체를 뒤로 젖힘',g:15}];
+ {id:8,name:'등받이에 기댐',desc:'상체를 뒤로 젖혀 카메라에서 멀어짐',g:15}];
 
+const TH={yaw:30,lean:7,drop:10}; // 고개 각도(°), 기댐 거리(cm), 어깨 하락(%)
 const S={status:'idle',study:0,startT:0,endT:0,lastResume:0,since:{},prog:{},clearSince:null,
- base:null,cal:[],reason:'',lastMotion:0,prev:null,writing:false};
+ base:null,cal:[],reason:'',lastMotion:0,prev:null,writing:false,lowMoveT:0};
 let ready=false,face,pose,hand;
 
 // 조건 목록 · 설정 UI
 $('#conds').innerHTML=CFG.map(c=>`<li id="c${c.id}"><span><b>${c.name}</b></span><span></span><small>${c.desc}</small><span></span><div class="bar"><i></i></div></li>`).join('')
  +`<li class="pen" id="cPen"><span><b>필기 자세</b></span><span></span><small>손 모양으로 필기를 추정해요. 감지되면 정지·손 위치 조건을 건너뛰어요.</small><span></span></li>`;
-$('#set').innerHTML=CFG.map(c=>`<label for="g${c.id}">${c.name}</label><input id="g${c.id}" type="number" min="1" max="600" value="${c.g}">`).join('');
+$('#set').innerHTML=CFG.map(c=>`<label for="g${c.id}">${c.name}</label><input id="g${c.id}" type="number" min="1" max="600" value="${c.g}">`).join('')
+ +[['yaw','고개 돌림 각도(°)'],['lean','기댐 거리(cm)'],['drop','엎드림 어깨 하락(%)']].map(([k,l])=>`<label for="t${k}">${l}</label><input id="t${k}" type="number" min="1" max="90" value="${TH[k]}">`).join('');
+Object.keys(TH).forEach(k=>$('#t'+k).addEventListener('input',e=>{TH[k]=Math.max(1,+e.target.value||TH[k])}));
 CFG.forEach(c=>$('#g'+c.id).addEventListener('input',e=>{c.g=Math.max(1,+e.target.value||c.g)}));
 
 // 모델 · 카메라
 async function boot(){
   badge('카메라와 모델을 준비하는 중…');
-  const st=await navigator.mediaDevices.getUserMedia({video:{width:640,height:480,facingMode:'user'},audio:false});
-  vid.srcObject=st;await vid.play();cv.width=vid.videoWidth;cv.height=vid.videoHeight;
+  const st=await navigator.mediaDevices.getUserMedia({video:{width:{ideal:640},height:{ideal:480},facingMode:'user'},audio:false});
+  vid.srcObject=st;await vid.play();cv.width=vid.videoWidth;cv.height=vid.videoHeight;$('.cam').style.aspectRatio=vid.videoWidth+' / '+vid.videoHeight;
   const fs=await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
   const M="https://storage.googleapis.com/mediapipe-models/";
   const mk=async delegate=>{
-    face=await FaceLandmarker.createFromOptions(fs,{baseOptions:{modelAssetPath:M+"face_landmarker/face_landmarker/float16/1/face_landmarker.task",delegate},runningMode:"VIDEO",numFaces:1,outputFaceBlendshapes:true});
+    face=await FaceLandmarker.createFromOptions(fs,{baseOptions:{modelAssetPath:M+"face_landmarker/face_landmarker/float16/1/face_landmarker.task",delegate},runningMode:"VIDEO",numFaces:1,outputFaceBlendshapes:true,outputFacialTransformationMatrixes:true});
     pose=await PoseLandmarker.createFromOptions(fs,{baseOptions:{modelAssetPath:M+"pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",delegate},runningMode:"VIDEO",numPoses:1});
     hand=await HandLandmarker.createFromOptions(fs,{baseOptions:{modelAssetPath:M+"hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",delegate},runningMode:"VIDEO",numHands:2});
   };
@@ -129,24 +133,29 @@ async function boot(){
   ready=true;requestAnimationFrame(loop);
 }
 
-// 특징 추출
+// 특징 추출 (카메라가 학생의 왼쪽 앞 45°에 있다고 가정)
 function extract(f,p,h){
   const o={face:false,sh:false,hands:[]};
   const fl=f.faceLandmarks[0];
   if(fl){
-    o.face=true;o.nose=fl[1];
-    const w=fl[454].x-fl[234].x;o.fw=Math.abs(w);o.yaw=(fl[1].x-fl[234].x)/(w||1);
+    o.face=true;o.nose=fl[1];o.fh=d(fl[10],fl[152]);
+    const m=f.facialTransformationMatrixes?.[0]?.data;
+    if(m){o.yaw=Math.atan2(-m[2],Math.hypot(m[0],m[1]))*180/Math.PI;o.dist=Math.abs(m[14]);} // 고개 각도(°), 카메라까지 거리(cm)
     const bs={};(f.faceBlendshapes[0]?.categories||[]).forEach(c=>bs[c.categoryName]=c.score);
     const g=n=>bs[n]||0;
     o.eye=(g('eyeBlinkLeft')+g('eyeBlinkRight'))/2-0.5*(g('eyeLookDownLeft')+g('eyeLookDownRight'))/2;
   }
   const pl=p.landmarks[0];
-  if(pl){const a=pl[11],b=pl[12];
-    if((a.visibility??1)>.5&&(b.visibility??1)>.5&&a.y<1&&b.y<1){o.sh=true;o.shY=(a.y+b.y)/2;o.shW=Math.abs(a.x-b.x);o.pts=[a,b];}}
+  if(pl){ // 한쪽 어깨만 사용: 카메라에서 더 잘 보이는(가까운) 어깨
+    const a=pl[11],b=pl[12],n=(a.visibility??1)>=(b.visibility??1)?a:b;
+    if((n.visibility??1)>.4&&n.y<1){o.sh=true;o.shY=n.y;o.pts=[n];}
+  }
   for(const hl of h.landmarks){
     const size=d(hl[0],hl[9])||1;
     o.hands.push({w:hl[0],c:{x:(hl[0].x+hl[9].x)/2,y:(hl[0].y+hl[9].y)/2},pinch:d(hl[4],hl[8])/size,lm:hl});
   }
+  // 손 모델이 못 찾으면(몸에 가려진 먼 쪽 손) 자세 모델의 손목으로 대신 사용
+  if(!o.hands.length&&pl)for(const i of [15,16]){const w=pl[i];if((w.visibility??1)>.5&&w.y<1)o.hands.push({w,c:w,pinch:9,lm:[w]})}
   return o;
 }
 
@@ -162,10 +171,10 @@ function draw(F){
 function evaluate(F,now){
   if(S.status==='calibrating'){
     if(F.face&&F.sh)S.cal.push(F);
-    badge(`보정 중 · 바른 자세로 앉아 주세요 (${Math.min(S.cal.length,25)}/25)`,'man');
+    badge(`보정 중 · 책이나 노트를 보는 평소 자세로 앉아 주세요 (${Math.min(S.cal.length,25)}/25)`,'man');
     if(S.cal.length>=25){
-      const m=k=>med(S.cal.map(x=>x[k]));
-      S.base={shY:m('shY'),shW:m('shW'),fw:m('fw'),yaw:m('yaw'),eye:m('eye')};
+      const m=k=>med(S.cal.map(x=>x[k]).filter(v=>v!==undefined));
+      S.base={shY:m('shY'),yaw:m('yaw'),dist:m('dist'),eye:m('eye'),fh:m('fh')};
       Object.assign(S,{status:'running',startT:now,lastResume:now,lastMotion:now,since:{},study:0});
     }
     return;
@@ -173,27 +182,31 @@ function evaluate(F,now){
   if(S.status!=='running'&&S.status!=='autoPaused')return;
   const B=S.base,chestY=(F.sh?F.shY:B.shY)+0.06;
 
-  // 필기 자세: 손가락을 모아 쥔 모양 + 가슴 아래
-  S.writing=F.hands.some(x=>x.pinch<.45&&x.w.y>chestY+.04);
-
   // 움직임(눈 깜빡임·손·상체)
-  const P=S.prev;let moved=S.writing;
+  const P=S.prev;let moved=false;
   if(P){
     if(F.face&&P.face&&(Math.abs(F.eye-P.eye)>.25||d(F.nose,P.nose)>.006))moved=true;
     if(F.sh&&P.sh&&Math.abs(F.shY-P.shY)>.006)moved=true;
     if(F.hands.length!==P.hands.length)moved=true;
-    else F.hands.forEach((x,i)=>{if(d(x.w,P.hands[i].w)>.012)moved=true});
+    else F.hands.forEach((x,i)=>{if(d(x.w,P.hands[i].w)>.012){moved=true;if(x.w.y>chestY+.04)S.lowMoveT=now}});
   }
-  S.prev=F;if(moved)S.lastMotion=now;
+  S.prev=F;
 
+  // 필기 자세: 가슴 아래 손이 연필을 쥔 모양이거나, 최근 2.5초 안에 작게 움직임
+  const low=F.hands.filter(x=>x.w.y>chestY+.04);
+  S.writing=low.some(x=>x.pinch<.6)||(low.length>0&&now-S.lowMoveT<2500);
+  if(S.writing||moved)S.lastMotion=now;
+
+  const drop=F.sh&&F.shY-B.shY>TH.drop/100;
   const raw={
     1:!F.face&&!F.sh,
-    2:F.face&&F.eye>Math.max(.5,B.eye+.35),
-    3:!F.face&&F.sh&&F.shY-B.shY>.10,
-    4:F.face&&Math.abs(F.yaw-B.yaw)>.2,
+    2:F.face&&F.eye>Math.max(.45,B.eye+.3),
+    3:!F.face&&drop,
+    // 얼굴이 보이면 기준 각도와의 차이, 안 보이는데 어깨는 보이면 고개를 돌린 것으로 간주(필기 중 숙임은 제외)
+    4:F.face?Math.abs(F.yaw-B.yaw)>TH.yaw:(F.sh&&!drop&&!S.writing),
     5:!S.writing&&now-S.lastMotion>3000,
-    6:!S.writing&&F.hands.some(x=>x.c.y<chestY||(F.face&&d(x.c,F.nose)<F.fw*.9)),
-    8:(F.sh&&F.shW<B.shW*.85)||(F.face&&F.fw<B.fw*.8)
+    6:!S.writing&&F.hands.some(x=>x.c.y<chestY||(F.face&&d(x.c,F.nose)<F.fh*1.1)),
+    8:F.face&&F.dist-B.dist>TH.lean
   };
   const n=CFG.filter(c=>raw[c.id]).length;
   const mult=n>=2?.5:1; // 조건이 겹치면 유예시간 절반
@@ -202,14 +215,14 @@ function evaluate(F,now){
     const id=c.id;
     if(raw[id]){
       S.since[id]=id===5?S.lastMotion:(S.since[id]??now);
-      const g=c.g*mult*(id===5&&!S.writing?.5:1)*1000; // 필기 자세 없음 + 정지면 더 짧게
+      const g=c.g*mult*(id===5&&!S.writing?.5:1)*1000;
       S.prog[id]=Math.min(1,(now-S.since[id])/g);
       if(now-S.since[id]>=g)conf.push(c);
     }else{S.since[id]=null;S.prog[id]=0}
   }
   if(S.status==='running'&&conf.length){
-    const s=Math.min(...conf.map(c=>S.since[c.id]));
-    S.study=Math.max(0,S.study-Math.min(now-s,now-S.lastResume)); // 시작 시점까지 소급 차감
+    const s0=Math.min(...conf.map(c=>S.since[c.id]));
+    S.study=Math.max(0,S.study-Math.min(now-s0,now-S.lastResume)); // 시작 시점까지 소급 차감
     S.status='autoPaused';S.reason=conf.map(c=>c.name).join(', ');S.clearSince=null;
   }else if(S.status==='autoPaused'){
     if(CFG.some(c=>raw[c.id]))S.clearSince=null;
@@ -226,7 +239,7 @@ let lastDet=0;
 function loop(){
   requestAnimationFrame(loop);
   if(!ready||vid.readyState<2)return;
-  const t=performance.now();if(t-lastDet<110)return;lastDet=t;
+  const t=performance.now();if(t-lastDet<130)return;lastDet=t;
   if(S.status==='idle'||S.status==='stopped'||S.status==='manualPaused'){ctx.clearRect(0,0,cv.width,cv.height);return}
   let F;
   try{F=extract(face.detectForVideo(vid,t),pose.detectForVideo(vid,t),hand.detectForVideo(vid,t))}catch(e){return}
