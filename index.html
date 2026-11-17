@@ -107,7 +107,8 @@ const CFG=[
 const TH={yaw:30,lean:7,drop:10}; // 고개 각도(°), 기댐 거리(cm), 어깨 하락(%)
 const S={status:'idle',study:0,startT:0,endT:0,lastResume:0,since:{},prog:{},clearSince:null,
  base:null,cal:[],reason:'',lastMotion:0,prev:null,writing:false,lowMoveT:0};
-let ready=false,face,pose,hand;
+let ready=false,fs;
+const MD={},errs={face:0,pose:0,hand:0};let rebuilding=false;
 
 // 조건 목록 · 설정 UI
 $('#conds').innerHTML=CFG.map(c=>`<li id="c${c.id}"><span><b>${c.name}</b></span><span></span><small>${c.desc}</small><span></span><div class="bar"><i></i></div></li>`).join('')
@@ -118,18 +119,33 @@ Object.keys(TH).forEach(k=>$('#t'+k).addEventListener('input',e=>{TH[k]=Math.max
 CFG.forEach(c=>$('#g'+c.id).addEventListener('input',e=>{c.g=Math.max(1,+e.target.value||c.g)}));
 
 // 모델 · 카메라
+const MU="https://storage.googleapis.com/mediapipe-models/";
+function make(k,delegate){
+  const bo=f=>({modelAssetPath:MU+f,delegate});
+  if(k==='face')return FaceLandmarker.createFromOptions(fs,{baseOptions:bo("face_landmarker/face_landmarker/float16/1/face_landmarker.task"),runningMode:"VIDEO",numFaces:1,outputFaceBlendshapes:true,outputFacialTransformationMatrixes:true});
+  if(k==='pose')return PoseLandmarker.createFromOptions(fs,{baseOptions:bo("pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task"),runningMode:"VIDEO",numPoses:1});
+  return HandLandmarker.createFromOptions(fs,{baseOptions:bo("hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"),runningMode:"VIDEO",numHands:2});
+}
+// 모델 하나가 오류를 내도 나머지는 계속 돌리고, 연속 2번 실패하면 CPU로 다시 만들어요
+function det(k,t){
+  try{const r=MD[k].detectForVideo(vid,t);errs[k]=0;return r}
+  catch(e){
+    console.warn(k,e);
+    if(++errs[k]>=2&&!rebuilding){rebuilding=true;make(k,'CPU').then(m=>{MD[k]=m;errs[k]=0}).catch(console.error).finally(()=>{rebuilding=false})}
+    return null;
+  }
+}
 async function boot(){
   badge('카메라와 모델을 준비하는 중…');
   const st=await navigator.mediaDevices.getUserMedia({video:{width:{ideal:640},height:{ideal:480},facingMode:'user'},audio:false});
   vid.srcObject=st;await vid.play();cv.width=vid.videoWidth;cv.height=vid.videoHeight;$('.cam').style.aspectRatio=vid.videoWidth+' / '+vid.videoHeight;
-  const fs=await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
-  const M="https://storage.googleapis.com/mediapipe-models/";
-  const mk=async delegate=>{
-    face=await FaceLandmarker.createFromOptions(fs,{baseOptions:{modelAssetPath:M+"face_landmarker/face_landmarker/float16/1/face_landmarker.task",delegate},runningMode:"VIDEO",numFaces:1,outputFaceBlendshapes:true,outputFacialTransformationMatrixes:true});
-    pose=await PoseLandmarker.createFromOptions(fs,{baseOptions:{modelAssetPath:M+"pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",delegate},runningMode:"VIDEO",numPoses:1});
-    hand=await HandLandmarker.createFromOptions(fs,{baseOptions:{modelAssetPath:M+"hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",delegate},runningMode:"VIDEO",numHands:2});
-  };
-  try{await mk("GPU")}catch(e){await mk("CPU")}
+  fs=await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
+  // 모델마다 GPU로 만들어 시험 실행해 보고, 오류가 나면 CPU로 다시 만들어요
+  for(const k of ['face','pose','hand']){
+    badge('모델 준비 중… ('+k+')');
+    try{MD[k]=await make(k,'GPU');MD[k].detectForVideo(vid,performance.now())}
+    catch(e){console.warn(k,'GPU 실패 → CPU',e);MD[k]=await make(k,'CPU')}
+  }
   ready=true;requestAnimationFrame(loop);
 }
 
@@ -240,14 +256,17 @@ function evaluate(F,now){
   }
 }
 
-let lastDet=0;
+let lastDet=0,tick=0,lastPose={landmarks:[]},lastHand={landmarks:[]};
 function loop(){
   requestAnimationFrame(loop);
   if(!ready||vid.readyState<2)return;
   const t=performance.now();if(t-lastDet<130)return;lastDet=t;
   if(S.status==='idle'||S.status==='stopped'||S.status==='manualPaused'){ctx.clearRect(0,0,cv.width,cv.height);return}
   let F;
-  try{F=extract(face.detectForVideo(vid,t),pose.detectForVideo(vid,t),hand.detectForVideo(vid,t))}catch(e){console.error(e);badge('감지 중 오류: '+(e.message||e),'stop');return}
+  // 얼굴은 매번, 자세와 손은 번갈아 가며 실행해 폰 부담을 줄여요
+  const f=det('face',t)||{faceLandmarks:[],faceBlendshapes:[],facialTransformationMatrixes:[]};
+  if(tick++%2===0)lastPose=det('pose',t)||{landmarks:[]};else lastHand=det('hand',t)||{landmarks:[]};
+  try{F=extract(f,lastPose,lastHand)}catch(e){console.error(e);badge('감지 중 오류: '+(e.message||e),'stop');return}
   draw(F);evaluate(F,t);
 }
 
