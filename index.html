@@ -148,7 +148,7 @@ function extract(f,p,h){
   const pl=p.landmarks[0];
   if(pl){ // 한쪽 어깨만 사용: 카메라에서 더 잘 보이는(가까운) 어깨
     const a=pl[11],b=pl[12],n=(a.visibility??1)>=(b.visibility??1)?a:b;
-    if((n.visibility??1)>.4&&n.y<1){o.sh=true;o.shY=n.y;o.pts=[n];}
+    if((n.visibility??1)>.25&&n.y<1.02){o.sh=true;o.shY=n.y;o.pts=[n];}
   }
   for(const hl of h.landmarks){
     const size=d(hl[0],hl[9])||1;
@@ -170,17 +170,22 @@ function draw(F){
 // 판정
 function evaluate(F,now){
   if(S.status==='calibrating'){
-    if(F.face&&F.sh)S.cal.push(F);
-    badge(`보정 중 · 책이나 노트를 보는 평소 자세로 앉아 주세요 (${Math.min(S.cal.length,25)}/25)`,'man');
+    if(F.face)S.cal.push(F);
+    const ck=v=>v?'✓':'✗';
+    const lost=!F.face&&now-S.calT>8000?' · 얼굴이 안 보여요. 폰 위치를 조정해 주세요':'';
+    badge(`보정 중 (${Math.min(S.cal.length,25)}/25) · 얼굴 ${ck(F.face)} 어깨 ${ck(F.sh)} 손 ${ck(F.hands.length)}${lost}`,'man');
     if(S.cal.length>=25){
       const m=k=>med(S.cal.map(x=>x[k]).filter(v=>v!==undefined));
-      S.base={shY:m('shY'),yaw:m('yaw'),dist:m('dist'),eye:m('eye'),fh:m('fh')};
-      Object.assign(S,{status:'running',startT:now,lastResume:now,lastMotion:now,since:{},study:0});
+      S.noSh=S.cal.filter(x=>x.sh).length<15; // 어깨가 거의 안 잡히면 어깨 없이 진행
+      S.base={shY:S.noSh?undefined:med(S.cal.filter(x=>x.sh).map(x=>x.shY)),yaw:m('yaw'),dist:m('dist'),eye:m('eye'),fh:m('fh')};
+      Object.assign(S,{status:'running',lastResume:now,lastMotion:now,since:{},study:0});
     }
     return;
   }
   if(S.status!=='running'&&S.status!=='autoPaused')return;
-  const B=S.base,chestY=(F.sh?F.shY:B.shY)+0.06;
+  const B=S.base;
+  const refY=F.sh&&!S.noSh?F.shY:(F.face?F.nose.y+F.fh*1.2:(B.shY??0.7));
+  const chestY=refY+0.06;
 
   // 움직임(눈 깜빡임·손·상체)
   const P=S.prev;let moved=false;
@@ -197,7 +202,7 @@ function evaluate(F,now){
   S.writing=low.some(x=>x.pinch<.6)||(low.length>0&&now-S.lowMoveT<2500);
   if(S.writing||moved)S.lastMotion=now;
 
-  const drop=F.sh&&F.shY-B.shY>TH.drop/100;
+  const drop=!S.noSh&&F.sh&&F.shY-B.shY>TH.drop/100;
   const raw={
     1:!F.face&&!F.sh,
     2:F.face&&F.eye>Math.max(.45,B.eye+.3),
@@ -242,7 +247,7 @@ function loop(){
   const t=performance.now();if(t-lastDet<130)return;lastDet=t;
   if(S.status==='idle'||S.status==='stopped'||S.status==='manualPaused'){ctx.clearRect(0,0,cv.width,cv.height);return}
   let F;
-  try{F=extract(face.detectForVideo(vid,t),pose.detectForVideo(vid,t),hand.detectForVideo(vid,t))}catch(e){return}
+  try{F=extract(face.detectForVideo(vid,t),pose.detectForVideo(vid,t),hand.detectForVideo(vid,t))}catch(e){console.error(e);badge('감지 중 오류: '+(e.message||e),'stop');return}
   draw(F);evaluate(F,t);
 }
 
@@ -291,7 +296,7 @@ function btn(){const run=['running','autoPaused','manualPaused','calibrating'].i
 bS.onclick=async()=>{
   bS.disabled=true;$('#sum').style.display='none';
   try{if(!ready)await boot()}catch(e){badge('카메라나 모델을 불러오지 못했어요. 카메라 권한과 인터넷 연결을 확인해 주세요.','stop');bS.disabled=false;console.error(e);return}
-  Object.assign(S,{status:'calibrating',cal:[],study:0,startT:0,since:{},prog:{},prev:null,reason:''});btn();lock();
+  Object.assign(S,{status:'calibrating',cal:[],study:0,startT:performance.now(),calT:performance.now(),noSh:false,since:{},prog:{},prev:null,reason:''});btn();lock();
 };
 bP.onclick=()=>{
   const now=performance.now();
