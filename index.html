@@ -57,11 +57,17 @@ summary{cursor:pointer;color:var(--mute)}
   li{font-size:15px}
 }
 @media(max-width:820px){.cam{max-height:36dvh}}
+@media(orientation:landscape) and (max-height:600px){
+  main{grid-template-columns:1fr 1fr;padding:8px 12px;gap:10px;align-items:start}
+  h1{display:none}
+  .cam{max-height:none;aspect-ratio:auto;height:calc(100dvh - 90px)}
+  .big{font-size:clamp(40px,8vw,64px)}
+}
 </style>
 </head>
 <body>
 <main>
-  <h1>공부 타이머 <span class="lab">폰을 학생의 왼쪽 앞 45°에 두고, 얼굴·왼쪽 어깨·양손이 화면에 들어오게 해 주세요. 영상은 이 폰 안에서만 처리돼요.</span></h1>
+  <h1>공부 타이머 <span class="lab">폰을 학생의 왼쪽 앞 45°에 두고, 얼굴·왼쪽 어깨·양손이 화면에 들어오게 해 주세요. 영상은 이 폰 안에서만 처리돼요. (v4)</span></h1>
 
   <section class="card">
     <div class="cam"><video id="vid" playsinline muted></video><canvas id="cv"></canvas></div>
@@ -122,7 +128,7 @@ CFG.forEach(c=>$('#g'+c.id).addEventListener('input',e=>{c.g=Math.max(1,+e.targe
 const MU="https://storage.googleapis.com/mediapipe-models/";
 function make(k,delegate){
   const bo=f=>({modelAssetPath:MU+f,delegate});
-  if(k==='face')return FaceLandmarker.createFromOptions(fs,{baseOptions:bo("face_landmarker/face_landmarker/float16/1/face_landmarker.task"),runningMode:"VIDEO",numFaces:1,outputFaceBlendshapes:true,outputFacialTransformationMatrixes:true});
+  if(k==='face')return FaceLandmarker.createFromOptions(fs,{baseOptions:bo("face_landmarker/face_landmarker/float16/1/face_landmarker.task"),runningMode:"VIDEO",numFaces:1,outputFaceBlendshapes:true});
   if(k==='pose')return PoseLandmarker.createFromOptions(fs,{baseOptions:bo("pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task"),runningMode:"VIDEO",numPoses:1});
   return HandLandmarker.createFromOptions(fs,{baseOptions:bo("hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"),runningMode:"VIDEO",numHands:2});
 }
@@ -149,14 +155,16 @@ async function boot(){
   ready=true;requestAnimationFrame(loop);
 }
 
+const ema={},sm=(k,v)=>ema[k]=ema[k]===undefined?v:ema[k]*.7+v*.3; // 떨림 줄이기(이동평균)
 // 특징 추출 (카메라가 학생의 왼쪽 앞 45°에 있다고 가정)
 function extract(f,p,h){
   const o={face:false,sh:false,hands:[]};
   const fl=f.faceLandmarks[0];
   if(fl){
     o.face=true;o.nose=fl[1];o.fh=d(fl[10],fl[152]);
-    const m=f.facialTransformationMatrixes?.[0]?.data;
-    if(m){o.yaw=Math.atan2(-m[2],Math.hypot(m[0],m[1]))*180/Math.PI;o.dist=Math.abs(m[14]);} // 고개 각도(°), 카메라까지 거리(cm)
+    // 고개 각도(°)와 얼굴 폭(카메라와의 거리 대용)을 양 볼 랜드마크의 3D 위치로 계산
+    const W=vid.videoWidth||1,dx=(fl[454].x-fl[234].x)*W,dz=(fl[454].z-fl[234].z)*W;
+    o.yaw=sm('yaw',Math.atan2(dz,dx)*180/Math.PI);o.fw3=sm('fw3',Math.hypot(dx,dz)/W);
     const bs={};(f.faceBlendshapes[0]?.categories||[]).forEach(c=>bs[c.categoryName]=c.score);
     const g=n=>bs[n]||0;
     o.eye=(g('eyeBlinkLeft')+g('eyeBlinkRight'))/2-0.5*(g('eyeLookDownLeft')+g('eyeLookDownRight'))/2;
@@ -193,7 +201,7 @@ function evaluate(F,now){
     if(S.cal.length>=25){
       const m=k=>med(S.cal.map(x=>x[k]).filter(v=>v!==undefined));
       S.noSh=S.cal.filter(x=>x.sh).length<15; // 어깨가 거의 안 잡히면 어깨 없이 진행
-      S.base={shY:S.noSh?undefined:med(S.cal.filter(x=>x.sh).map(x=>x.shY)),yaw:m('yaw'),dist:m('dist'),eye:m('eye'),fh:m('fh')};
+      S.base={shY:S.noSh?undefined:med(S.cal.filter(x=>x.sh).map(x=>x.shY)),yaw:m('yaw'),fw3:m('fw3'),eye:m('eye'),fh:m('fh')};
       Object.assign(S,{status:'running',lastResume:now,lastMotion:now,since:{},study:0});
     }
     return;
@@ -227,7 +235,7 @@ function evaluate(F,now){
     4:F.face?Math.abs(F.yaw-B.yaw)>TH.yaw:(F.sh&&!drop&&!S.writing),
     5:!S.writing&&now-S.lastMotion>3000,
     6:!S.writing&&F.hands.some(x=>x.c.y<chestY||(F.face&&d(x.c,F.nose)<F.fh*1.1)),
-    8:F.face&&F.dist-B.dist>TH.lean
+    8:F.face&&B.fw3/F.fw3>1+TH.lean/60 // 얼굴이 작아짐 = 카메라에서 멀어짐(약 60cm 거리 기준)
   };
   const n=CFG.filter(c=>raw[c.id]).length;
   const mult=n>=2?.5:1; // 조건이 겹치면 유예시간 절반
